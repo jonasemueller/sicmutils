@@ -112,6 +112,7 @@
 (def ^:private simplifies-to-one?
   #(-> % *rf-analyzer* v/one?))
 
+;; TODO see if we can move this into rules...
 (def trig-cleanup
   "This finds things like a - a cos^2 x and replaces them with a sin^2 x"
   (let [at-least-two? #(and (number? %) (>= % 2))]
