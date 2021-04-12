@@ -78,6 +78,7 @@
      (rational-function-analyzer)))))
 
 (defn hermetic-simplify-fixture
+  "Wrapper fn that skips the memoization cache."
   [f]
   (binding [*rf-simplify* (a/expression-simplifier
                            (rational-function-analyzer))
@@ -85,16 +86,11 @@
                              (poly-analyzer))]
     (f)))
 
-(def ^:private simplify-and-flatten
-  #'*rf-simplify*)
+;; ## From scmutils
+;;
+;; This is the good stuff, tying together rules.scm.
 
-(comment
-  ;; TODO - this is what is going on in the scmutils codebase.
-  (def ^:private simplify-and-flatten
-    (comp #'*poly-simplify*
-          #'*rf-simplify*)))
-
-(defn ^:private simplify-until-stable
+(defn- simplify-until-stable
   [rule-simplify canonicalize]
   (fn [expression]
     (let [new-expression (rule-simplify expression)]
@@ -110,7 +106,10 @@
 
                 :else (recur canonicalized-expression)))))))
 
-(defn ^:private simplify-and-canonicalize
+(defn- simplify-and-canonicalize
+  "Single round of `simplify-until-stable` above.
+
+   TODO more docs, consolidate."
   [rule-simplify canonicalize]
   (fn [expression]
     (let [new-expression (rule-simplify expression)]
@@ -118,17 +117,29 @@
         expression
         (canonicalize new-expression)))))
 
+(def ^:private simplify-and-flatten
+  #'*rf-simplify*)
+
+(comment
+  ;; TODO - this is what is going on in the scmutils codebase.
+  (def ^:private simplify-and-flatten
+    (comp #'*poly-simplify*
+          #'*rf-simplify*)))
+
 (def ^:private sin-sq->cos-sq-simplifier
   (simplify-and-canonicalize
-   rules/sin-sq->cos-sq simplify-and-flatten))
+   rules/sin-sq->cos-sq
+   simplify-and-flatten))
 
 (def ^:private sincos-simplifier
   (simplify-and-canonicalize
-   rules/sincos-flush-ones simplify-and-flatten))
+   rules/sincos-flush-ones
+   simplify-and-flatten))
 
 (def ^:private square-root-simplifier
   (simplify-and-canonicalize
-   rules/simplify-square-roots simplify-and-flatten))
+   rules/simplify-square-roots
+   simplify-and-flatten))
 
 ;; looks like we might have the modules inverted: rulesets will need some
 ;; functions from the simplification library, so this one has to go here. Not
@@ -143,6 +154,8 @@
   (v/one?
    (*rf-simplify* expr)))
 
+;; TODO see if we can move this into rules and verify that they don't already
+;; exist there!
 (def trig-cleanup
   "This finds things like a - a cos^2 x and replaces them with a sin^2 x"
   (let [at-least-two? #(and (number? %) (>= % 2))]
@@ -208,92 +221,92 @@
 (def simplify-expression
   (simplify-until-stable simplify-expression-1 simplify-and-flatten))
 
-(defn- haz
-  "Returns a function which checks whether its argument, a set, has a nonempty
+(comment
+  (defn- haz
+    "Returns a function which checks whether its argument, a set, has a nonempty
   intersection with thing-set."
-  [thing-set]
-  (fn [expr]
-    (-> (x/variables-in expr)
-        (set/intersection thing-set)
-        (not-empty))))
+    [thing-set]
+    (fn [expr]
+      (-> (x/variables-in expr)
+          (set/intersection thing-set)
+          (not-empty))))
 
-(defn only-if
-  "returns a function that will apply f to its argument x if (p x), else returns x."
-  [p f]
-  (fn [x]
-    (if (p x) (f x) x)))
+  (defn only-if
+    "returns a function that will apply f to its argument x if (p x), else returns x."
+    [p f]
+    (fn [x]
+      (if (p x) (f x) x)))
 
-#_(defn ^:private new-simplify
-  [x]
-  (let [sqrt? (haz #{'sqrt})
-        full-sqrt? (haz #{'sqrt}) ;; normally, (and sqrt? sqrt-factor-simplify?)
-        logexp? (haz #{'log 'exp})
-        sincos? (haz #{'sin 'cos})
-        partials? (haz #{'partial})
-        simplified-exp ((comp (only-if (fn [x] true #_"divide-numbers-through-simplify?")
-                                       rules/divide-numbers-through)
-                              (only-if sqrt? rules/clear-square-roots-of-perfect-squares)
-                              (only-if full-sqrt?
-                                       (comp
-                                        (simplify-until-stable (comp rules/universal-reductions
-                                                                        sqrt-expand)
-                                                               simplify-and-flatten)
-                                        clear-square-roots-of-perfect-squares
-                                        (simplify-until-stable sqrt-contract
-                                                               simplify-and-flatten)))
-                              (only-if sincos?
-                                       (comp (simplify-and-canonicalize
-                                                 (comp rules/universal-reductions sincos->trig)
-                                                 simplify-and-flatten)
-                                                (simplify-and-canonicalize angular-parity
-                                                                           simplify-and-flatten)
-                                                (simplify-until-stable sincos-random
-                                                                       simplify-and-flatten)
-                                                (simplify-and-canonicalize sin-sq->cos-sq
-                                                                           simplify-and-flatten)
-                                                (simplify-and-canonicalize sincos-flush-ones
-                                                                           simplify-and-flatten)
-                                                (if trig-product-to-sum-simplify?
-                                                  (simplify-and-canonicalize trig-product-to-sum
-                                                                             simplify-and-flatten)
-                                                  (lambda (x) x))
-                                                (simplify-and-canonicalize rules/universal-reductions
-                                                                           simplify-and-flatten)
-                                                (simplify-until-stable sincos-random
-                                                                       simplify-and-flatten)
-                                                (simplify-and-canonicalize sin-sq->cos-sq
-                                                                           simplify-and-flatten)
-                                                (simplify-and-canonicalize sincos-flush-ones
-                                                                           simplify-and-flatten)))
-
-
-                              (only-if logexp?
-                                       (comp
-                                        (simplify-and-canonicalize rules/universal-reductions
-                                                                   simplify-and-flatten)
-                                        (simplify-until-stable (comp log-expand exp-expand)
-                                                               simplify-and-flatten)
-                                        (simplify-until-stable (comp log-contract exp-contract)
-                                                               simplify-and-flatten)))
+  (defn- new-simplify [x]
+    (let [sqrt? (haz #{'sqrt})
+          full-sqrt? (haz #{'sqrt}) ;; normally, (and sqrt? sqrt-factor-simplify?)
+          logexp? (haz #{'log 'exp})
+          sincos? (haz #{'sin 'cos})
+          partials? (haz #{'partial})
+          simplified-exp ((comp (only-if (fn [x] true #_"divide-numbers-through-simplify?")
+                                         rules/divide-numbers-through)
+                                (only-if sqrt? rules/clear-square-roots-of-perfect-squares)
+                                (only-if full-sqrt?
+                                         (comp
+                                          (simplify-until-stable (comp rules/universal-reductions
+                                                                       sqrt-expand)
+                                                                 simplify-and-flatten)
+                                          clear-square-roots-of-perfect-squares
+                                          (simplify-until-stable sqrt-contract
+                                                                 simplify-and-flatten)))
+                                (only-if sincos?
+                                         (comp (simplify-and-canonicalize
+                                                (comp rules/universal-reductions sincos->trig)
+                                                simplify-and-flatten)
+                                               (simplify-and-canonicalize angular-parity
+                                                                          simplify-and-flatten)
+                                               (simplify-until-stable sincos-random
+                                                                      simplify-and-flatten)
+                                               (simplify-and-canonicalize sin-sq->cos-sq
+                                                                          simplify-and-flatten)
+                                               (simplify-and-canonicalize sincos-flush-ones
+                                                                          simplify-and-flatten)
+                                               (if trig-product-to-sum-simplify?
+                                                 (simplify-and-canonicalize trig-product-to-sum
+                                                                            simplify-and-flatten)
+                                                 (lambda (x) x))
+                                               (simplify-and-canonicalize rules/universal-reductions
+                                                                          simplify-and-flatten)
+                                               (simplify-until-stable sincos-random
+                                                                      simplify-and-flatten)
+                                               (simplify-and-canonicalize sin-sq->cos-sq
+                                                                          simplify-and-flatten)
+                                               (simplify-and-canonicalize sincos-flush-ones
+                                                                          simplify-and-flatten)))
 
 
-                              (simplify-until-stable (comp rules/universal-reductions
-                                                              (only-if logexp?
-                                                                       (comp log-expand
-                                                                                exp-expand))
-                                                              (only-if sqrt? sqrt-expand))
-                                                     simplify-and-flatten)
+                                (only-if logexp?
+                                         (comp
+                                          (simplify-and-canonicalize rules/universal-reductions
+                                                                     simplify-and-flatten)
+                                          (simplify-until-stable (comp log-expand exp-expand)
+                                                                 simplify-and-flatten)
+                                          (simplify-until-stable (comp log-contract exp-contract)
+                                                                 simplify-and-flatten)))
 
-                              (only-if sincos?
-                                       (simplify-and-canonicalize angular-parity
-                                                                  simplify-and-flatten))
-                              (simplify-and-canonicalize trig->sincos simplify-and-flatten)
-                              (only-if partials?
-                                       (simplify-and-canonicalize canonicalize-partials
-                                                                  simplify-and-flatten))
-                              simplify-and-flatten)
-                        exp)]
-    simplified-exp))
+
+                                (simplify-until-stable (comp rules/universal-reductions
+                                                             (only-if logexp?
+                                                                      (comp log-expand
+                                                                            exp-expand))
+                                                             (only-if sqrt? sqrt-expand))
+                                                       simplify-and-flatten)
+
+                                (only-if sincos?
+                                         (simplify-and-canonicalize angular-parity
+                                                                    simplify-and-flatten))
+                                (simplify-and-canonicalize trig->sincos simplify-and-flatten)
+                                (only-if partials?
+                                         (simplify-and-canonicalize canonicalize-partials
+                                                                    simplify-and-flatten))
+                                simplify-and-flatten)
+                          exp)]
+      simplified-exp)))
 
 (defn expression->stream
   "Renders an expression through the simplifier and onto the stream."
