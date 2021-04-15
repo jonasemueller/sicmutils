@@ -22,79 +22,104 @@
   defined in [[pattern.match]]."
   (:require [pattern.match :as m]))
 
-(defn- compile-consequence
-  "Compiles a consequence (written as a pattern), by returning a code fragment
-  which will replace instances of variable and segment references in the
-  consequence with values provided by the frame referred to by frame-symbol.
+;; TODO NOTE! NOW we have rules, predicates and skeletons, in GJS land.
 
-  The form is meant to be evaluated in an environment where frame-symbol is
-  bound to a mapping of pattern variables to their desired substitutions."
-  [frame-symbol consequence]
-  (cond
-    (m/segment-reference? consequence)
-    (let [v (m/variable consequence)
-          function-of-frame (if (symbol? v) `(quote ~v) v)]
-      `(~function-of-frame ~frame-symbol))
+(def => m/no-constraint)
 
-    (m/variable-reference? consequence)
-    (let [v (m/variable consequence)
-          function-of-frame (if (symbol? v) `(quote ~v) v)]
-      `(list (~function-of-frame ~frame-symbol)))
-
-    (seq? consequence)
-    `(list (concat ~@(map
-                      (partial compile-consequence frame-symbol)
-                      consequence)))
-
-    :else `(list '~consequence)))
-
-
-(defn- expose-predicate
-  "This is currently a little tricky to explain.
-
-  A variable pattern in a ruleset might be written (:? 'a integer?).
-
-  If we were to quote the entire ruleset, then the constraint part -- `integer?`
-  -- would have the form of a symbol, and not what we want, which is the
-  function object bound to `integer?`
-
-  `expose-predicate` processes a form into code that will return the variable
-  pattern in a form in which the predicate function is 'exposed' to evaluation."
-  [[_ sym pred]]
-  `(list :? '~sym ~pred))
-
-(defn- prepare-pattern
+(defn- compile-pattern
   "Replace form with code that will construct the equivalent form with variable
   predicate values exposed to evaluation (see above)."
   [form]
-  (cond (m/variable-reference-with-predicate? form) (expose-predicate form)
-        (list? form) (cons 'list (map prepare-pattern form))
-        (symbol? form) `(quote ~form)
+  (cond (keyword? form)   form
+        (symbol? form)    (list 'quote form)
+
+        (or (m/element? form)
+            (m/segment? form)
+            (m/reverse-segment? form))
+        (let [[k sym & preds] form]
+          `(list ~k '~sym ~@preds))
+
+        (sequential? form) (cons 'list (map compile-pattern form))
+
         :else form))
 
-(defn- rule-body
-  "Rule takes a match pattern and substitution pattern, compiles each
-  of these and returns a function which may be applied to a form
-  and (optionally) a success continuation. The function will try to
-  match the pattern and, if successful, _and_ the bindings satisfy the
-  supplied predicate, will call the continuation with the result of
-  the substitution."
-  [pattern predicate? consequence]
-  (let [prepared-pattern (prepare-pattern pattern)
-        replace-if (if (= predicate? '=>)
-                     `(constantly true)
-                     predicate?)
-        frame-symbol (gensym)
-        compiled-consequence (compile-consequence frame-symbol consequence)]
-    `(let [matcher# (m/pattern->matcher ~prepared-pattern)]
-       (fn apply#
-         [data# continue#]
-         (if-let [~frame-symbol (m/match matcher# data# ~replace-if)]
-           (continue# (first ~compiled-consequence)))))))
+(defn compile-predicate [pred]
+  (if (= pred '=>)
+    `(constantly true)
+    pred))
+
+(defn- lookup [m x]
+  (let [f (if (symbol? x)
+            `(quote ~x)
+            x)]
+    (list f m)))
+
+(defn- compile-skeleton
+  "Compiles a skeleton expression (written as a pattern), by returning a code
+  fragment which will replace instances of variable and segment references in
+  the skeleton with values provided by the frame referred to by `frame-sym`.
+
+  The form is meant to be evaluated in an environment where `frame-sym` is bound
+  to a mapping of pattern variables to their desired substitutions.
+
+  NOTE: Returns a list, always!
+
+  NOTE: The difference from the original stuff is, here, we have a nice
+  dictionary data structure, so the final function just takes that.
+
+  NOTE: reverse segments don't appear in the final bit! just do the normal."
+  [frame-sym skel]
+  (letfn [(compile [elem]
+            (cond (m/element? elem)
+                  (let [v (m/variable-name elem)]
+                    `(list ~(lookup frame-sym v)))
+
+                  (m/segment? elem)
+                  (let [v (m/variable-name elem)]
+                    (lookup frame-sym v))
+
+                  (sequential? elem)
+                  `(list (concat ~@(map compile elem)))
+
+                  :else `(list '~elem)))]
+    `(first ~(compile skel))))
+
+(defn- compile-rule
+  "Rule takes a match pattern and substitution pattern, compiles each of these and
+  returns a function which may be applied to a form and (optionally) a success
+  continuation.
+
+  The function will try to match the pattern and, if successful, _and_ the
+  bindings satisfy the supplied predicate, will call the continuation with the
+  result of the substitution.
+
+  TODO note that in the two arg case, you give a function of the bindings.
+
+  TODO NOTE that if the consequent-fn in the two arg case returns falsey, the
+  whole thing fails."
+  ([pattern consequent-fn]
+   (let [pattern-expr (compile-pattern pattern)]
+     `(let [matcher# (m/pattern->matcher ~pattern-expr)]
+        (fn [data# success#]
+          (if-let [frame# (m/match matcher# data#)]
+            (when-let [result# (~consequent-fn frame#)]
+              (success# result#)))))))
+
+  ([pattern predicate skeleton]
+   (let [pattern-expr     (compile-pattern pattern)
+         pred-expr        (compile-predicate predicate)
+         frame-sym        (gensym)
+         skeleton-expr    (compile-skeleton frame-sym skeleton)]
+     `(let [matcher# (m/pattern->matcher ~pattern-expr)]
+        (fn [data# success#]
+          (if-let [~frame-sym (m/match matcher# data# ~pred-expr)]
+            (success# ~skeleton-expr)))))))
 
 (defmacro rule
-  [pattern predicate? consequence]
-  (rule-body pattern predicate? consequence))
+  ([pattern consequent-fn]
+   (compile-rule pattern consequent-fn))
+  ([pattern predicate? skeleton]
+   (compile-rule pattern predicate? skeleton)))
 
 (defmacro ruleset
   "Ruleset compiles rules, predicates and consequences (triplet-wise)
@@ -102,17 +127,22 @@
   produce) which acts by invoking the success continuation with the
   consequence of the first successful rule whose patterns match and
   satisfy the predicate. If no rules match, the failure continuation
-  is invoked."
+  is invoked.
+
+  TODO note that currently we ONLY allow triplets, but we really should allow
+  pairs... take an explicit list."
   [& patterns-and-consequences]
   {:pre (zero? (mod (count patterns-and-consequences) 3))}
   (let [rule-inputs (partition 3 patterns-and-consequences)
-        rules (mapv #(apply rule-body %) rule-inputs)]
+        rules       (mapv #(apply compile-rule %) rule-inputs)]
     `(let [rules# ~rules]
        (fn [data# continue# fail#]
          (or (some #(% data# continue#) rules#)
              (fail# data#))))))
 
-(defn ^:private try-rulesets
+;; TODO how can we cache these??
+
+(defn- try-rulesets
   "Execute the supplied rulesets against expression in order. The
   first ruleset to succeed in rewriting an expression will cause
   the success continuation to be invoked and the process will stop.
@@ -122,7 +152,6 @@
     (ruleset expression succeed #(try-rulesets rulesets % succeed))
     expression))
 
-
 (defn rule-simplifier
   "Transform the supplied rulesets into a function of expressions
   which will arrange to apply each of the rules in the ruleset to all
@@ -131,7 +160,7 @@
   of the simplification process is achieved."
   [& rulesets]
   (fn simplifier [expression]
-    (let [simplified (if (seq? expression)
+    (let [simplified (if (sequential? expression)
                        (map simplifier expression)
                        expression)]
       (try-rulesets rulesets simplified simplifier))))

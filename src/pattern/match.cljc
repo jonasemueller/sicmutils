@@ -28,179 +28,300 @@
 
 ;; # Pattern Matcher
 ;;
-;; Notes on the implementation.
+;; A match procedure takes a data item, a dictionary, and a success
+;; continuation. The dictionary accumulates the assignments of match variables
+;; to values found in the data. The success continuation takes the new
+;; dictionary as an argument.
+;;
+;; If a match procedure fails it returns nil, or false.
+;;
+;; ### Notes on our Implementation
 ;;
 ;; A "Frame" here is an environment of bindings.
 ;;
-;; A "Matcher" is a function of:
+;; A "matcher" is a function of:
 ;;
-;; - frame
-;; - some datum
+;; - a frame
+;; - some datum, a data item
 ;; - a continuation to call if success is achieved
 ;;
-;; The "succeed" continuation takes the frame and the REST of the forms.
+;; The "succeed" continuation takes the frame and the REST of the forms in
+;; the "datum"... which I think in this case is a data expression, just anything
+;; at all.
 ;;
 ;; TODO missing elements:
 ;;
-;; match:eqv
 ;; match:predicate
 
-(def ^:private zero
-  [{} nil])
+;; ### Constraints
+;;
+;; TODO note this too - a constraint is... well, just a predicate, I guess. This
+;; is the predicate that always returns true.
 
-(def ^:private no-constraint
+(def ^{:doc "Predicate that returns `true` for any input."}
+  no-constraint
   (constantly true))
 
 (defn predicate
-  "If the predicate succeeds on the head, calls the continuation with the frame
-  and tail, else fails."
+  "Takes a predicate and returns a matcher that fails if the predicate fails when
+  applied to the first item in its datum argument, or succeeds with `(next xs)`
+  and no new bindings if the predicate passes.
+
+  TODO note that this applies to sequential stuff."
   [pred]
-  (fn [frame xs succeed]
+  (fn predicate-match [frame xs succeed]
     (and (sequential? xs)
          (pred (first xs))
          (succeed frame (next xs)))))
 
-;; TODO note match:equal in matcher.scm.
-(defn match-one
-  "Combinator which succeeds iff the head of the data is equal to thing. The frame
-  is not modified."
+(defn match-eq
+  "Returns a matcher which succeeds iff the head of the data is equal to thing.
+  The frame is not modified.
+
+  NOTE that this is like match:equal. Also note eq-fn etc."
   ([thing]
-   (match-one thing =))
+   (match-eq thing =))
   ([thing eq-fn]
    (predicate
-    #(eq-fn thing %))))
+    (fn [x]
+      (eq-fn thing x)))))
 
-;; TODO note match:element in scheme.
-(defn match-var
+(defn match-element
   "If:
+
+  - there is more matchable data (with a first entry that satisfies the optional
+  constraint predicate), and
   - the variable is not bound in the frame
-  - there is more matchable data (that satisfies the optional constraint
-    predicate)
+
   This combinator will succeed by
-  - consuming the next item in the data and
+
+  - consuming the next item in the data, and
   - producing a frame in which the data seen is bound to the pattern variable.
+
   If the variable is bound, then the value seen must match the binding to
-  succeed (the frame is not modified in this case).
-  TODO note that this is DIFFERENT than what we find in scmutils! There, we
-  apply the predicate BEFORE the lookup. Test with both. Does this matter?"
-  ([var]
-   (match-var var no-constraint))
-  ([var predicate?]
-   (fn [frame data succeed]
-     (when (sequential? data)
-       (when-let [[x & xs] data]
-         (if-let [binding (frame var)]
-           (and (= binding x)
-                (succeed frame xs))
-           (when (predicate? x)
-             (succeed (assoc frame var x) xs))))))))
+  succeed (the frame is not modified in this case)."
+  ([sym]
+   (match-element sym no-constraint))
+  ([sym predicate?]
+   (fn element-match [frame data succeed]
+     (when (and (sequential? data)
+                (seq data))
+       (let [[x & xs] data]
+         (when (predicate? x)
+           (if-let [binding (frame sym)]
+             (and (= binding x)
+                  (succeed frame xs))
+             (succeed (assoc frame sym x) xs))))))))
 
-;; TODO note match:segment in matcher.scm. Gotta go over this again and
+;; ## Lists and Segments
+
+;; Segment variables introduce some additional trouble. Unlike other matchers, a
+;; segment variable is not tested against a fixed datum that it either matches
+;; or not, but against a list such that it may match any prefix. This means that
+;; in general, segment variables must search, trying one match and possibly
+;; backtracking.
+;;
+;; There are, however, two circumstances when the search can be avoided:
+;;
+;; - if the variable is already bound, the bound value needs to be checked
+;;   against the data, but no guessing as to how much data to consume is
+;;   required.
+;;
+;; - Also, if the segment variable is the last matcher in its enclosing
+;;   list (which actually happens quite often!) then the list matcher already
+;;   knows how much data must be matched, and no search is needed.
+
+;; TODO note match:segment in matcher.scm Gotta go over this again and
 ;; guarantee that it is actually doing the right thing.
-(defn match-segment [var]
-  (fn [frame xs succeed]
-    (when (sequential? xs)
-      (if-let [binding (frame var)]
-        ;; the segment value is bound.
-        (let [binding-count (count binding)]
-          ;; succeed when the counts match... no actual equality check. TODO is
-          ;; that okay? NO, TODO we need to fix this!
-          (when (= (take binding-count xs) binding)
-            (succeed frame (drop binding-count xs))))
-        ;; the segment value is unbound. Try the match with successively longer
-        ;; prefixes grabbed; fail when we run out.
-        (loop [before [] after xs]
-          (or (succeed (assoc frame var before) after)
-              (when-not (empty? after)
-                (recur (conj before (first after))
-                       (next after)))))))))
 
-(defn match-list [matchers]
-  (fn [frame xs succeed]
-    (if (sequential? xs)
-      (let [step (fn step
-                   [frame as matchers]
-                   (cond matchers ((first matchers) frame as
-                                   #(step %1 %2 (next matchers)))
-                         (not (empty? as)) false
-                         :else (succeed frame (next xs))))]
+;;
+;; NOTE: The original does some clever stuff when we have an explicit LIST we're
+;; using for matching. Instead of storing the actual prefix as a binding, the other systems store:
+;;
+;; - a pointer to the beginning of the prefix
+;; - a pointer to the END of the prefix
+
+(defn match-segment
+  "Takes a segment variable and binds successively longer prefixes to the symbol,
+  calling the continuation with each one to see if it succeeds.
+
+  If the segment is already present in the frame, it only succeeds if the
+  current prefix of `xs` matches the already bound prefix."
+  [sym]
+  (fn segment-match [frame xs succeed]
+    (let [xs (or xs [])]
+      (when (sequential? xs)
+        (if-let [binding (frame sym)]
+          (let [binding-count (count binding)]
+            (when (= (take binding-count xs) binding)
+              (succeed frame (drop binding-count xs))))
+          (loop [prefix []
+                 suffix xs]
+            (or (succeed (assoc frame sym prefix) suffix)
+                (and (seq suffix)
+                     (recur (conj prefix (first suffix))
+                            (next suffix))))))))))
+
+(defn reverse-segment
+  "Succeeds if the symbol is ALREADY bound, and the next block matches the reverse
+  of the binding."
+  [sym]
+  (fn reverse-segment-match [frame xs succeed]
+    (let [xs (or xs [])]
+      (when (sequential? xs)
+        (when-let [binding (frame sym)]
+          (let [binding-count (count binding)
+                reversed      (rseq binding)]
+            (when (= (take binding-count xs) reversed)
+              (succeed frame (drop binding-count xs)))))))))
+
+(defn- match-final-segment
+  "Version of `match-segment` that does no searching."
+  [sym]
+  (fn final-segment-match [frame xs succeed]
+    (let [xs (or xs [])]
+      (when (sequential? xs)
+        (if-let [binding (frame sym)]
+          (when (= xs binding)
+            (succeed frame nil))
+          (succeed (assoc frame sym xs) nil))))))
+
+(defn match-list
+  "Takes a sequence of matchers and returns a NEW matcher that will try them one
+  at a time.
+
+  Each matcher is called with a success continuation that attempts to match the
+  new frame and returned `xs` against the remaining matchers.
+
+  If the matcher list runs out, AND there are remaining items, the whole
+  returned matcher fails!
+
+  If the matchers, running all together, match everything, then the FULL success
+  continuation `succeed` is called with a single item dropped.
+
+  TODO tidy this up once I stare at use cases."
+  [matchers]
+  (fn list-match [frame xs succeed]
+    (when (sequential? xs)
+      (letfn [(step [frame items matchers]
+                (cond matchers ((first matchers)
+                                frame
+                                items
+                                (fn [new-frame new-xs]
+                                  (step new-frame new-xs (next matchers))))
+
+                      (seq items) false
+
+                      :else (succeed frame (next xs))))]
+        ;; NOTE this `(first xs)` is the only weird part for me... why is the
+        ;; list matcher living in a list?
         (step frame (first xs) matchers)))))
 
-;; TODO match:reverse-segment
+;; ## Accessors
 
+(defn- keyword-suffix
+  "Returns the final character of the supplied keyword `kwd`."
+  [kwd]
+  (let [s (name kwd)
+        c (count s)]
+    (.charAt ^String s (dec c))))
 
-;; TODO note, this is match:element?
-
-(defn variable-reference?
-  "Returns true if x is a variable reference (i.e., it looks like (:? ...)) or is
-  a simple keyword, false otherwise."
-  [x]
-  (or (keyword? x)
-      (and (sequential? x)
-           (= (first x) :?))))
-
-;; TODO note, this is (every-pred match:element? match:restricted?)
-(defn variable-reference-with-predicate?
-  "Returns true if x is a variable reference and is also equipped with a
-  constraint on matched values, false otherwise."
-  [x]
-  (and (variable-reference? x)
-       (sequential? x)
-       (> (count x) 2)))
-
-;; TODO match:segment?
-(defn segment-reference?
-  "Returns true if x is a segment reference (i.e., it looks like (:?? ...)) or is
-  a keyword ending in `*`, false otherwise."
-  [x]
-  (or (and (keyword? x)
-           (let [s (name x)
-                 c (count s)]
-             (= \* (nth s (dec c)))))
-      (and (sequential? x)
-           (= (first x) :??))))
-
-
-;; TODO match:variable-name
-(defn variable
-  "Returns the variable contained in a variable or segment reference form."
-  [x]
-  (if (keyword? x)
-    x
-    (second x)))
-
-;; TODO: match:restriction
-(defn- variable-constraint
-  "If x is a variable reference in a pattern with a constraint,
-  returns that constraint; else returns a stock function which
-  enforces no constraint at all."
-  [x]
-  (if (keyword? x)
-    no-constraint
-    (nth x 2 no-constraint)))
-
-;; TODO match:reverse-segment? missing
-
-;; TODO note match:->combinators
-(defn pattern->matcher
-  "Given a pattern (which is essentially a form consisting of
-  constants mixed with pattern variables) returns a match combinator
-  for the pattern."
+(defn restricted?
+  "TODO let's allow multiple restrictions, and combine them together with
+  every-pred. This has to happen in `restriction`."
   [pattern]
-  (cond (variable-reference? pattern)
-        (match-var (variable pattern)
-                   (variable-constraint pattern))
+  (and (sequential? pattern)
+       (> (count pattern) 2)))
 
-        (segment-reference? pattern)
-        (match-segment (variable pattern))
+(defn element?
+  "Returns true if `pattern` is a variable reference (i.e., it looks like `(:?
+  ...)`) or is a simple keyword (not ending in `$` or `*`), false otherwise."
+  [pattern]
+  (or (and (keyword? pattern)
+           (not (#{\* \$} (keyword-suffix pattern))))
 
-        ;; TODO add match:reverse-segment?
-        ;; TODO check empty list - does this clause cover or do we need a
-        ;; separate?
+      (and (sequential? pattern)
+           (= (first pattern) :?))))
+
+(defn element-with-restriction?
+  "Returns true if `pattern` is a variable reference and is also equipped with a
+  constraint on matched values, false otherwise."
+  [pattern]
+  (and (element? pattern)
+       (restricted? pattern)))
+
+(defn segment?
+  "Returns true if `pattern` is a segment reference (i.e., it looks like `(:??
+  ...)`) or is a keyword ending in `*`, false otherwise."
+  [pattern]
+  (or (and (keyword? pattern)
+           (= \* (keyword-suffix pattern)))
+
+      (and (sequential? pattern)
+           (= (first pattern) :??))))
+
+(defn reverse-segment?
+  "Returns true if x is a REVERSED segment reference (i.e., it looks like `(:$$
+  ...)`) or is a keyword ending in `$`, false otherwise."
+  [pattern]
+  (or (and (keyword? pattern)
+           (= \$ (keyword-suffix pattern)))
+
+      (and (sequential? pattern)
+           (= (first pattern) :$$))))
+
+(defn variable-name
+  "Returns the variable contained in a variable or segment reference form.
+
+  TODO should we always convert these to keywords? That would certainly make it
+  easier to look stuff up in frames..."
+  [pattern]
+  (if (keyword? pattern)
+    pattern
+    (second pattern)))
+
+(defn- restriction
+  "If `pattern` is a variable reference in a pattern with a constraint,
+  returns that constraint; else returns a stock function which enforces no
+  constraint at all.
+
+  Multiple constraints are allowed."
+  [pattern]
+  (if (keyword? pattern)
+    no-constraint
+    (if-let [fs (seq (drop 2 pattern))]
+      (apply every-pred fs)
+      no-constraint)))
+
+(defn pattern->matcher
+  "Given a pattern (which is essentially a form consisting of constants mixed with
+  pattern variables) returns a match combinator for the pattern."
+  [pattern]
+  (cond (element? pattern)
+        (match-element (variable-name pattern)
+                       (restriction pattern))
+
+        (segment? pattern)
+        (match-segment (variable-name pattern))
+
+        (reverse-segment? pattern)
+        (reverse-segment (variable-name pattern))
+
+        (= () pattern) (match-eq ())
+
         (sequential? pattern)
-        (match-list (map pattern->matcher pattern))
 
-        :else (match-one pattern)))
+        (match-list
+         ;; NOTE: The final element can go faster, that's why we do this.
+         (concat (map pattern->matcher (butlast pattern))
+                 (let [p (last pattern)]
+                   [(if (segment? p)
+                      (match-final-segment (variable-name p))
+                      (pattern->matcher p))])))
+
+        :else (match-eq pattern)))
+
+;; ## Higher Level API
 
 (defn match
   "Convenience function for applying a match combinator to some data.
@@ -211,7 +332,7 @@
    return the pattern bindings if the match is successful,
    nil otherwise.
 
-   If predicate is supplied, then the resulting frame of a match must satisfy
+  If predicate is supplied, then the resulting frame of a match must satisfy
   this predicate. Otherwise we continue searching."
   ([matcher data]
    (match matcher data no-constraint))
@@ -221,3 +342,23 @@
                               (predicate frame))
                      frame))]
      (matcher {} (list data) receive))))
+
+(defn foreach
+  "TODO Calls `f` with each frame (and optionally tail), for side effects."
+  [f matcher data & {:keys [include-tails?]}]
+  (matcher {}
+           data
+           (fn [frame xs]
+             (if include-tails?
+               (f frame xs)
+               (f frame))
+             false)))
+
+(defn all-results-matcher
+  ([matcher input & {:keys [include-tails?]}]
+   (let [results  (atom [])
+         callback (if include-tails?
+                    #(swap! results conj [%1 %2])
+                    #(swap! results conj %1))]
+     (foreach callback matcher input :include-tails? include-tails?)
+     @results)))
