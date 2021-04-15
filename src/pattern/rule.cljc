@@ -72,29 +72,34 @@
   NOTE: I KNOW we can make this more efficient by sending some marker variable
   to see if we're down in the recursion. THINK!"
   [frame-sym skel]
-  (letfn [(compile [elem wrap?]
-            (cond (m/element? elem)
-                  (let [v (m/variable-name elem)]
-                    (if wrap?
-                      `(list ~(lookup frame-sym v))
-                      (lookup frame-sym v)))
-
-                  (m/segment? elem)
+  (letfn [(compile [elem]
+            (cond (or (m/element? elem)
+                      (m/segment? elem))
                   (let [v (m/variable-name elem)]
                     (lookup frame-sym v))
 
                   (sequential? elem)
-                  (let [next (if (some m/segment? elem)
-                               `(concat ~@(map #(compile % true) elem))
-                               `(list ~@(map #(compile % false) elem)))]
-                    (if wrap?
-                      `(list ~next)
-                      next))
+                  (compile-sequential elem)
 
-                  :else (if wrap?
-                          `(list '~elem)
-                          `'~elem)))]
-    (compile skel false)))
+                  :else `'~elem))
+
+          (compile-sequential [xs]
+            (let [[acc pending] (reduce
+                                 (fn [[acc pending] item]
+                                   (let [compiled (compile item)]
+                                     (if (m/segment? item)
+                                       (if (empty? pending)
+                                         [(conj acc compiled) []]
+                                         [(conj acc pending compiled) []])
+                                       [acc (conj pending compiled)])))
+                                 [[] []]
+                                 xs)]
+              (cond (and (empty? acc)
+                         (empty? pending)) '()
+                    (empty? acc)     `(list ~@pending)
+                    (empty? pending) `(concat ~@acc)
+                    :else `(concat ~@(conj acc pending)))))]
+    (compile skel)))
 
 (defn- compile-rule
   "Rule takes a match pattern and substitution pattern, compiles each of these and
