@@ -67,7 +67,10 @@
   NOTE: The difference from the original stuff is, here, we have a nice
   dictionary data structure, so the final function just takes that.
 
-  NOTE: reverse segments don't appear in the final bit! just do the normal."
+  NOTE: reverse segments don't appear in the final bit! just do the normal.
+
+  NOTE: I KNOW we can make this more efficient by sending some marker variable
+  to see if we're down in the recursion. THINK!"
   [frame-sym skel]
   (letfn [(compile [elem]
             (cond (m/element? elem)

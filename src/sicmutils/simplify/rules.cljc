@@ -570,26 +570,26 @@
                        (note-that! note)
                        `(atan ,yv ,xv)))))))) )
 
-     ( (sin (asin (? x))) none (: x) )
+     ( (sin (asin (? x))) none (:? x) )
      ( (asin (sin (? x)))
       (and inverse-simplify?
            (let ((xs (rcf:simplify x)))
              (assume! `(= (asin (sin ,xs)) ,xs) 'asin-sin)))
-      (: x) )
+      (:? x) )
 
-     ( (cos (acos (? x))) none (: x) )
+     ( (cos (acos (? x))) none (:? x) )
      ( (acos (cos (? x)))
       (and inverse-simplify?
            (let ((xs (rcf:simplify x)))
              (assume! `(= (acos (cos ,xs)) ,xs) 'acos-cos)))
-      (: x) )
+      (:? x) )
 
      ( (tan (atan (? x))) none (: x) )
      ( (atan (tan (? x)))
       (and inverse-simplify?
            (let ((xs (rcf:simplify x)))
              (assume! `(= (atan (tan ,xs)) ,xs) 'atan-tan)))
-      (: x) )
+      (:? x) )
 
      ( (sin (acos (? x))) none (sqrt (- 1 (expt (: x) 2))) )
      ( (cos (asin (? y))) none (sqrt (- 1 (expt (: y) 2))) )
