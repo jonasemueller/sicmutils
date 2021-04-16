@@ -226,3 +226,12 @@
                  (empty? y))))]
       (is (palindrome? '(a b c c b a)))
       (is (not (palindrome? '(a b c c a b)))))))
+
+(deftest new-tests
+  (is (= {'x '+, :y 'z}
+         (m/match (m/match-list [(m/match-element 'x)])
+                  ['+]
+                  (fn [m] {:y 'z})))
+      "We can add new bindings to the map."))
+
+;; TODO note splice, test it in rules!

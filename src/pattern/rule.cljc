@@ -24,24 +24,25 @@
 
 ;; TODO NOTE! NOW we have rules, predicates and skeletons, in GJS land.
 
-(def => m/no-constraint)
-
 (defn- compile-pattern
-  "Replace form with code that will construct the equivalent form with variable
-  predicate values exposed to evaluation (see above)."
-  [form]
-  (cond (keyword? form)   form
-        (symbol? form)    (list 'quote form)
+  "Replace `pattern` with code that will construct the equivalent form with
+  variable predicate values exposed to evaluation (see above).
 
-        (or (m/element? form)
-            (m/segment? form)
-            (m/reverse-segment? form))
-        (let [[k sym & preds] form]
+  TODO make this extensible."
+  [pattern]
+  (cond (keyword? pattern)   pattern
+        (symbol? pattern)    (list 'quote pattern)
+        (m/splice? pattern)  (m/spliced-form pattern)
+
+        (or (m/element? pattern)
+            (m/segment? pattern)
+            (m/reverse-segment? pattern))
+        (let [[k sym & preds] pattern]
           `(list ~k '~sym ~@preds))
 
-        (sequential? form) (cons 'list (map compile-pattern form))
+        (sequential? pattern) (cons 'list (map compile-pattern pattern))
 
-        :else form))
+        :else pattern))
 
 (defn compile-predicate [pred]
   (if (= pred '=>)
@@ -62,15 +63,10 @@
   The form is meant to be evaluated in an environment where `frame-sym` is bound
   to a mapping of pattern variables to their desired substitutions.
 
-  NOTE: Returns a list, always!
-
   NOTE: The difference from the original stuff is, here, we have a nice
   dictionary data structure, so the final function just takes that.
 
-  NOTE: reverse segments don't appear in the final bit! just do the normal.
-
-  NOTE: I KNOW we can make this more efficient by sending some marker variable
-  to see if we're down in the recursion. THINK!"
+  NOTE: reverse segments don't appear in the final bit! just do the normal."
   [frame-sym skel]
   (letfn [(compile [elem]
             (cond (or (m/element? elem)
@@ -160,10 +156,10 @@
 ;; TODO how can we cache these??
 
 (defn- try-rulesets
-  "Execute the supplied rulesets against expression in order. The
-  first ruleset to succeed in rewriting an expression will cause
-  the success continuation to be invoked and the process will stop.
-  If no ruleset succeeds, the original expression is returned."
+  "Execute the supplied rulesets against expression in series. The first ruleset
+  to succeed in rewriting an expression will cause the success continuation to
+  be invoked and the process will stop. If no ruleset succeeds, the original
+  expression is returned."
   [[ruleset & rulesets] expression succeed]
   (if ruleset
     (ruleset expression succeed #(try-rulesets rulesets % succeed))
@@ -181,3 +177,7 @@
                        (map simplifier expression)
                        expression)]
       (try-rulesets rulesets simplified simplifier))))
+
+
+;; TODO: do we want the top down stuff here too??
+;; https://github.com/axch/rules/blob/master/term-rewriting.scm

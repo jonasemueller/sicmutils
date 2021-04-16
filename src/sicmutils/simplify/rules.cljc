@@ -21,10 +21,11 @@
   (:require [pattern.rule :refer [ruleset rule-simplifier =>]
              #?@(:cljs [:include-macros true])]
             [sicmutils.complex :as c]
+            [sicmutils.expression :as x]
             [sicmutils.generic :as g]
             [sicmutils.value :as v]))
 
-;; TODO troll for places like (: (- n 2)), where I actually need toperform a
+;; TODO troll for places like (: (- n 2)), where I actually need to perform a
 ;; computation BEFORE substitution instead of just subbing in the (+ 1 ), for
 ;; example.
 
@@ -65,6 +66,42 @@
 (defn- at-least-two? [x]
   (and (v/number? x) (>= x 2)))
 
+;; Ported from Alexey's Rules.
+
+(defn unary-elimination
+  "Takes a sequence `ops` of operator symbols like `'+`, `'*` and returns a rule
+  that strips these operations off of unary applications.
+
+  ```clojure
+  (let [rule (unary-elimination '+ '*)
+        f    (rule-simplifier rule)]
+    (f '(+ x y (* z) (+ a))))
+  ;;=> (+ x y z a)
+  ```"
+  [& ops]
+  (let [op-set (into #{} ops)]
+    (ruleset
+     ((:? :op op-set) :x) => :x)))
+
+;; TODO get syntax going to match constants that I specify.
+
+(defn constant-elimination
+  "Takes an operation `op` and an identity element `constant` and returns a rule
+  that eliminates instances of `constant` inside binary forms like `(<op> l
+  r)`."
+  [op constant]
+  (ruleset ((:? :op #{op}) :l :r)
+           #(or (= constant (% :l))
+                (= constant (% :r)))
+           (:? (fn [{:keys [l r]}]
+                 (if (= constant l) r l)))))
+
+(defn constant-promotion [op constant]
+  (ruleset ((:? :op #{op}) :l :r)
+           #(or (= constant (% :l))
+                (= constant (% :r)))
+           (:? (fn [_] constant))))
+
 (defn associative
   "Takes a sequence `ops` of operator symbols like `'+`, `'*` and returns a rule
   that collapses nested applications of each operation into a single list. (The
@@ -86,39 +123,46 @@
                       (rest term)
                       [term])))]
     (ruleset
-     (:op :a* (:op :b*) :c*)
-     #(op-set (% :op))
+     ((:? :op op-set) :a* (:op :b*) :c*)
+     =>
      (:op :a* (:?? (fn [{:keys [op b* c*] :as m}]
                      (mapcat (flatten op)
                              (concat b* c*))))))))
 
-(defn unary-elimination
-  "Takes a sequence `ops` of operator symbols like `'+`, `'*` and returns a rule
-  that strips these operations off of unary applications.
 
-  ```clojure
-  (let [rule (unary-elimination '+ '*)
-        f    (rule-simplifier rule)]
-    (f '(+ x y (* z) (+ a))))
-  ;;=> (+ x y z a)
-  ```"
+;; - return NEW bindings from the predicate!
+;; move this sorted stuff to exprression, plus a `sort` function
+
+(defn commutative
+  "Flipping one at a time is bubble sort
+
+  (rule `(,operator (?? a) (? y) (? x) (?? b))
+        (and (expr<? x y)
+             `(,operator ,@a ,x ,y ,@b)))
+
+  Finding a pair out of order and sorting is still quadratic,
+  because the matcher matches N times, and each requires
+  constructing the segments so they can be handed to the handler
+  (laziness would help).
+
+  (rule `(,operator (?? a) (? y) (? x) (?? b))
+        (and (expr<? x y)
+             `(,operator ,@(sort `(,@a ,x ,y ,@b) expr<?))))"
   [& ops]
   (let [op-set (into #{} ops)]
     (ruleset
-     (:op :x) #(op-set (% :op)) :x)))
+     ((:? :op op-set) :terms*)
+     #(not (x/sorted? (% :terms*)))
+     (:op (:?? #(x/sort (:terms* %)))))))
 
-(defn constant-elimination
-  "Takes an operation `op` and an identity element `constant` and returns a rule
-  that eliminates instances of `constant` inside binary forms like `(<op> l
-  r)`."
-  [op constant]
-  (ruleset (:op :l :r)
-           #(and (= op (% :op))
-                 (or (= constant (% :l))
-                     (= constant (% :r))))
-           (:? (fn [{:keys [l r]}]
-                 (if (= constant l) r l)))))
-
+(defn idempotent [& ops]
+  (let [op-set (into #{} ops)]
+    (ruleset
+     ((:? :op op-set) :a* :x :x :b*)
+     =>
+     (:op (:?? (fn [m]
+                 (dedupe
+                  (concat (:a* m) [(:x m)] (:b* m)))))))))
 
 (def ^{:doc "Set of rules that collect adjacent products, exponents and nested
  exponents into exponent terms."}

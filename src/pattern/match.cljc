@@ -233,6 +233,13 @@
   (and (sequential? pattern)
        (> (count pattern) 2)))
 
+(defn splice? [pattern]
+  (and (sequential? pattern)
+       (= (first pattern) :splice)))
+
+(defn spliced-form [pattern]
+  (second pattern))
+
 (defn element?
   "Returns true if `pattern` is a variable reference (i.e., it looks like `(:?
   ...)`) or is a simple keyword (not ending in `$` or `*`), false otherwise."
@@ -295,7 +302,10 @@
 
 (defn pattern->matcher
   "Given a pattern (which is essentially a form consisting of constants mixed with
-  pattern variables) returns a match combinator for the pattern."
+  pattern variables) returns a match combinator for the pattern.
+
+  TODO this is a good place to open up dispatch, as Alexey does, and make new,
+  extensible syntax for matchers."
   [pattern]
   (cond (element? pattern)
         (match-element (variable-name pattern)
@@ -307,17 +317,18 @@
         (reverse-segment? pattern)
         (reverse-segment (variable-name pattern))
 
-        (= () pattern) (match-eq ())
-
         (sequential? pattern)
+        (if (empty? pattern)
+          (match-eq pattern)
+          (match-list
+           ;; NOTE: The final element can go faster, that's why we do this.
+           (concat (map pattern->matcher (butlast pattern))
+                   (let [p (last pattern)]
+                     [(if (segment? p)
+                        (match-final-segment (variable-name p))
+                        (pattern->matcher p))]))))
 
-        (match-list
-         ;; NOTE: The final element can go faster, that's why we do this.
-         (concat (map pattern->matcher (butlast pattern))
-                 (let [p (last pattern)]
-                   [(if (segment? p)
-                      (match-final-segment (variable-name p))
-                      (pattern->matcher p))])))
+        (fn? pattern) pattern
 
         :else (match-eq pattern)))
 
@@ -338,9 +349,11 @@
    (match matcher data no-constraint))
   ([matcher data predicate]
    (let [receive (fn [frame data]
-                   (when (and (empty? data)
-                              (predicate frame))
-                     frame))]
+                   (when-let [m (and (empty? data)
+                                     (predicate frame))]
+                     (if (map? m)
+                       (merge frame m)
+                       frame)))]
      (matcher {} (list data) receive))))
 
 (defn foreach

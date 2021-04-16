@@ -190,3 +190,13 @@
       (is (= '((expt sin 2) t) (R '(expt (sin t) 2))))
       (is (= '((expt cos 2) t) (R '(expt (cos t) 2))))
       (is (= nil (R '(expt x 2)))))))
+
+(deftest new-tests
+  (let [R (rule-1
+           ((:splice (pattern.match/match-eq '+)) () (:? a) (:? a))
+           =>
+           (* 2 (:? a)))]
+    (is (= '(* 2 x)
+           (R '(+ () x x)))
+        "testing splice, splicing in an actual matcher vs a literal, and empty
+        list matching.")))
